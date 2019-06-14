@@ -42,33 +42,33 @@ func NewPCFAuthMethod(conf *auth.AuthConfig) (auth.AuthMethod, error) {
 }
 
 func (p *pcfMethod) Authenticate(ctx context.Context, client *api.Client) (string, map[string]interface{}, error) {
-	pathToClientCert := os.Getenv(pcf.EnvVarInstanceCertificate)
-	if pathToClientCert == "" {
+	pathToInstanceCert := os.Getenv(pcf.EnvVarInstanceCertificate)
+	if pathToInstanceCert == "" {
 		return "", nil, fmt.Errorf("missing %q value", pcf.EnvVarInstanceCertificate)
 	}
-	certBytes, err := ioutil.ReadFile(pathToClientCert)
+	certBytes, err := ioutil.ReadFile(pathToInstanceCert)
 	if err != nil {
 		return "", nil, err
 	}
-	pathToClientKey := os.Getenv(pcf.EnvVarInstanceKey)
-	if pathToClientKey == "" {
+	pathToInstanceKey := os.Getenv(pcf.EnvVarInstanceKey)
+	if pathToInstanceKey == "" {
 		return "", nil, fmt.Errorf("missing %q value", pcf.EnvVarInstanceKey)
 	}
 	signingTime := time.Now().UTC()
 	signatureData := &signatures.SignatureData{
-		SigningTime: signingTime,
-		Role:        p.roleName,
-		Certificate: string(certBytes),
+		SigningTime:            signingTime,
+		Role:                   p.roleName,
+		CFInstanceCertContents: string(certBytes),
 	}
-	signature, err := signatures.Sign(pathToClientKey, signatureData)
+	signature, err := signatures.Sign(pathToInstanceKey, signatureData)
 	if err != nil {
 		return "", nil, err
 	}
 	data := map[string]interface{}{
-		"role":         p.roleName,
-		"certificate":  string(certBytes),
-		"signing_time": signingTime.Format(signatures.TimeFormat),
-		"signature":    signature,
+		"role":             p.roleName,
+		"cf_instance_cert": string(certBytes),
+		"signing_time":     signingTime.Format(signatures.TimeFormat),
+		"signature":        signature,
 	}
 	return fmt.Sprintf("%s/login", p.mountPath), data, nil
 }

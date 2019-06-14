@@ -46,7 +46,7 @@ fmtcheck:
 	@sh -c "'$(CURDIR)/scripts/gofmtcheck.sh'"
 
 gencerts:
-	@sh -c "'$(CURDIR)/scripts/generate-test-certs.sh'"
+	go run '$(CURDIR)/scripts/generate-test-certs.go'
 
 fmt:
 	gofmt -w $(GOFMT_FILES)

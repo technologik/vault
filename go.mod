@@ -2,6 +2,8 @@ module github.com/hashicorp/vault
 
 go 1.12
 
+replace github.com/hashicorp/vault-plugin-auth-pcf => ../vault-plugin-auth-pcf
+
 replace github.com/hashicorp/vault/api => ./api
 
 replace github.com/hashicorp/vault/sdk => ./sdk
