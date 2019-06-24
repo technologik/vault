@@ -446,7 +446,7 @@ have an ACL policy granting the `update` capability.
   parameter to be set on all write requests. If false, the backend’s
   configuration will be used.
 
-- `delete_version_after` (`string:"0s"`) – Set the `delete_version_after` value
+- `delete_version_after` `(string:"0s")` – Set the `delete_version_after` value
   to a duration to specify the `deletion_time` for all new versions
   written to this key. If not set, the backend's `delete_version_after` will be
   used. If the value is greater than the backend's `delete_version_after`, the
