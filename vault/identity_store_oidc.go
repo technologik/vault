@@ -47,10 +47,10 @@ type namedKey struct {
 	KeyRing         []*expireableKey `json:"key_ring"`
 	SigningKey      *jose.JSONWebKey `json:"signing_key"`
 	NextRotation    time.Time        `json:"next_rotation"`
+	AllowedRoles    []string         `json:"allowed_roles"`
 }
 
 type role struct {
-	Name     string        `json:"name"` // TODO: do we need/want this?
 	TokenTTL time.Duration `json:"token_ttl"`
 	Key      string        `json:"key"`
 	Template string        `json:"template"`
@@ -135,6 +135,11 @@ func oidcPaths(i *IdentityStore) []*framework.Path {
 					Type:        framework.TypeString,
 					Description: "Signing algorithm to use. This will default to RS256, and is currently the only allowed value.",
 					Default:     "RS256",
+				},
+
+				"allowed_roles": &framework.FieldSchema{
+					Type:        framework.TypeCommaStringSlice,
+					Description: "Comma separated string or array of role names allowed to use this key for signing. If empty no roles are allowed. If \"*\" all roles are allowed.",
 				},
 			},
 			Callbacks: map[logical.Operation]framework.OperationFunc{
@@ -354,16 +359,19 @@ func (i *IdentityStore) pathOIDCCreateUpdateKey(ctx context.Context, req *logica
 	name := d.Get("name").(string)
 
 	var key namedKey
-	entry, err := req.Storage.Get(ctx, namedKeyConfigPath+name)
-	if err != nil {
-		return nil, err
+	if req.Operation == logical.CreateOperation {
+		key.Name = name
 	}
-	if entry != nil {
-		if err := entry.DecodeJSON(&key); err != nil {
+	if req.Operation == logical.UpdateOperation {
+		entry, err := req.Storage.Get(ctx, namedKeyConfigPath+name)
+		if err != nil {
 			return nil, err
 		}
-	} else {
-		key.Name = name
+		if entry != nil {
+			if err := entry.DecodeJSON(&key); err != nil {
+				return nil, err
+			}
+		}
 	}
 
 	if rotationPeriodRaw, ok := d.GetOk("rotation_period"); ok {
@@ -372,18 +380,24 @@ func (i *IdentityStore) pathOIDCCreateUpdateKey(ctx context.Context, req *logica
 		key.RotationPeriod = time.Duration(d.Get("rotation_period").(int)) * time.Second
 	}
 
+	if key.RotationPeriod < 1*time.Minute {
+		return logical.ErrorResponse("rotation_period must be at least one minute"), nil
+	}
+
 	if verificationTTLRaw, ok := d.GetOk("verification_ttl"); ok {
 		key.VerificationTTL = time.Duration(verificationTTLRaw.(int)) * time.Second
 	} else if req.Operation == logical.CreateOperation {
 		key.VerificationTTL = time.Duration(d.Get("verification_ttl").(int)) * time.Second
 	}
 
-	if key.RotationPeriod < 1*time.Minute {
-		return logical.ErrorResponse("rotation_period must be at least one minute"), nil
-	}
-
 	if key.VerificationTTL > 10*key.RotationPeriod {
 		return logical.ErrorResponse("verification_ttl cannot be longer than 10x rotation_period"), nil
+	}
+
+	if allowedRolesRaw, ok := d.GetOk("allowed_roles"); ok {
+		key.AllowedRoles = allowedRolesRaw.([]string)
+	} else if req.Operation == logical.CreateOperation {
+		key.AllowedRoles = d.Get("allowed_roles").([]string)
 	}
 
 	if algorithm, ok := d.GetOk("algorithm"); ok {
@@ -418,7 +432,7 @@ func (i *IdentityStore) pathOIDCCreateUpdateKey(ctx context.Context, req *logica
 	}
 
 	// store named key
-	entry, err = logical.StorageEntryJSON(namedKeyConfigPath+name, key)
+	entry, err := logical.StorageEntryJSON(namedKeyConfigPath+name, key)
 	if err != nil {
 		return nil, err
 	}
@@ -451,6 +465,7 @@ func (i *IdentityStore) pathOIDCReadKey(ctx context.Context, req *logical.Reques
 			"rotation_period":  int64(storedNamedKey.RotationPeriod.Seconds()),
 			"verification_ttl": int64(storedNamedKey.VerificationTTL.Seconds()),
 			"algorithm":        storedNamedKey.Algorithm,
+			"allowed_roles":    storedNamedKey.AllowedRoles,
 		},
 	}, nil
 }
@@ -477,7 +492,7 @@ func (i *IdentityStore) pathOIDCDeleteKey(ctx context.Context, req *logical.Requ
 				return nil, err
 			}
 			if role.Key == targetKeyName {
-				rolesReferencingTargetKeyName = append(rolesReferencingTargetKeyName, role.Name)
+				rolesReferencingTargetKeyName = append(rolesReferencingTargetKeyName, roleName)
 			}
 		}
 	}
@@ -568,7 +583,6 @@ func (i *IdentityStore) pathOIDCGenerateToken(ctx context.Context, req *logical.
 	}
 	if role == nil {
 		return logical.ErrorResponse("role %q not found", roleName), nil
-
 	}
 
 	var key *namedKey
@@ -586,6 +600,10 @@ func (i *IdentityStore) pathOIDCGenerateToken(ctx context.Context, req *logical.
 		}
 
 		i.oidcCache.SetDefault("namedKeys/"+role.Key, key)
+	}
+	// Validate that the role is allowed to sign with its key (the key could have been updated)
+	if !strutil.StrListContains(key.AllowedRoles, "*") && !strutil.StrListContainsGlob(key.AllowedRoles, roleName) {
+		return logical.ErrorResponse("The key %q does not list the role %q as an allowed_role", role.Key, roleName), nil
 	}
 
 	// generate an OIDC token from entity data
@@ -722,13 +740,15 @@ func (i *IdentityStore) pathOIDCCreateUpdateRole(ctx context.Context, req *logic
 	name := d.Get("name").(string)
 
 	var role role
-	entry, err := req.Storage.Get(ctx, roleConfigPath+name)
-	if err != nil {
-		return nil, err
-	}
-	if entry != nil {
-		if err := entry.DecodeJSON(&role); err != nil {
+	if req.Operation == logical.UpdateOperation {
+		entry, err := req.Storage.Get(ctx, roleConfigPath+name)
+		if err != nil {
 			return nil, err
+		}
+		if entry != nil {
+			if err := entry.DecodeJSON(&role); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -742,13 +762,23 @@ func (i *IdentityStore) pathOIDCCreateUpdateRole(ctx context.Context, req *logic
 		return logical.ErrorResponse("key must be provided"), nil
 	}
 
-	// validate that key exists
-	entry, err = req.Storage.Get(ctx, namedKeyConfigPath+role.Key)
+	// Validate that key exists
+	entry, err := req.Storage.Get(ctx, namedKeyConfigPath+role.Key)
 	if err != nil {
 		return nil, err
 	}
 	if entry == nil {
 		return logical.ErrorResponse("key %q does not exist", role.Key), nil
+	}
+
+	// Validate that the role is allowed to use this key
+	var namedKey namedKey
+	if err := entry.DecodeJSON(&namedKey); err != nil {
+		return nil, err
+	}
+	if !strutil.StrListContains(namedKey.AllowedRoles, "*") && !strutil.StrListContainsGlob(namedKey.AllowedRoles, name) {
+		// TODO - this allows someone without access to keys to confirm whether or not a named key exists
+		return logical.ErrorResponse("The key %q does not list the role %q as an allowed_role", role.Key, name), nil
 	}
 
 	if template, ok := d.GetOk("template"); ok {
@@ -803,8 +833,6 @@ func (i *IdentityStore) pathOIDCCreateUpdateRole(ctx context.Context, req *logic
 		}
 		role.ClientID = clientID
 	}
-
-	role.Name = name // TODO: needed???
 
 	// store role (which was either just created or updated)
 	entry, err = logical.StorageEntryJSON(roleConfigPath+name, role)
